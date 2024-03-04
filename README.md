@@ -13,7 +13,7 @@ Please, don't report issues if you can't setup required environment for script (
 * Git, obviously.
 * Following Luarocks:
 * * [`luajson`](https://github.com/harningt/luajson) (available as `lua-json` package on Ubuntu)
-  * `subprocess`
+  * `posix`
   * `luaossl` + `luasocket` (first depends on later)
 
 

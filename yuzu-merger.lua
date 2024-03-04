@@ -1,19 +1,20 @@
 local json = require 'json'
 local https = require 'ssl.https'
 local ltn12 = require 'ltn12'
-local subprocess = require 'subprocess'
+local posix = require 'posix'
 
 -- Hack to let it work on Lua <= 5.3 (untested)
 if not math.maxinteger then
 	math.maxinteger = math.huge
 end
 
-local function requestIssuesPaged(page, label)
+local function requestIssuesPaged(page, label, all)
 	local response_body = {}
+	local token = os.getenv 'YUZU_MERGER_TOKEN'
 
 	local res, code, response_headers = https.request {
 		url = table.concat {'https://api.github.com/repos/yuzu-emu/yuzu/issues',
-			'?state=open';
+			('?state=%s'):format(all and "all" or "open");
 			(label and
 				'&labels='..label or
 				''
@@ -28,6 +29,7 @@ local function requestIssuesPaged(page, label)
 
 		headers = {
 			Accept = 'application/vnd.github.v3.text+json';
+			Authorization = token and (('token %s'):format(token));
 		}
 	}
 
@@ -37,9 +39,9 @@ local function requestIssuesPaged(page, label)
 	return table.concat(response_body)
 end
 
-local function forEachIssue(callback, label)
+local function forEachIssue(callback, label, all)
 	for i=1, math.maxinteger do
-		local data = json.decode(requestIssuesPaged(i, label))
+		local data = json.decode(requestIssuesPaged(i, label, all))
 
 		if #data == 0 then break end
 
@@ -50,13 +52,11 @@ local function forEachIssue(callback, label)
 end
 
 local function gitCommand(ignore_errors, ...)
-	local args = {'git', ...}
-	args.close_fds = true
-	local code = assert(subprocess.call(args))
+	local code = assert(posix.spawn({'git', ...}))
 
 	if (code ~= 0 and not ignore_errors) then
 		io.stderr:write(([[Git command `%s' failed, terminating
-]]):format(table.concat(args, ' ')))
+]]):format(table.concat({...}, ' ')))
 		os.exit(true, true)
 	end
 
@@ -71,8 +71,7 @@ local function mergePr(pr, mergeType)
 
 	print(('Merging PR #%d: %s'):format(pr.number, pr.title))
 
-	-- We assume that PRs will not have >1000 commits, that would be entirely different level of problems
-	gitCommand(false, 'fetch', '-f', '--depth=1000', '--recurse-submodules', '-j5', 'origin', ('pull/%d/head:yuzu-merger-pr%d'):format(pr.number, pr.number))
+	gitCommand(false, 'fetch', '-f', '--recurse-submodules', '-j5', 'origin', ('pull/%d/head:yuzu-merger-pr%d'):format(pr.number, pr.number))
 	gitCommand(false, 'merge', '--no-gpg-sign', '-m', ('yuzu-merger %s: PR #%d: %s'):format(mergeType, pr.number, pr.title), ('yuzu-merger-pr%d'):format(pr.number))
 end
 
@@ -91,15 +90,14 @@ if not prToMerge then
 		return
 	end
 
-	print('Pulling new changes, updating submodules')
-	gitCommand(false, 'pull')
-	gitCommand(false, 'submodule', 'update', '--recursive', '--init')
+	print('Pulling new changes')
+	gitCommand(false, 'pull', '--prune')
 
 	do
 		::requestion::
 		io.write('Do you want to apply mainline patches? [Yn]: ')
 		local res = io.read 'l'
-	
+
 		if res == '' or res:lower() == 'y' then
 			applyPatches('mainline-merge')
 			print('Mainline patches applied')
@@ -133,9 +131,11 @@ else
 	elseif prToMerge == 'mainline' then
 		applyPatches('mainline-merge')
 		print('Mainline patches applied per request')
+		goto done
 	elseif prToMerge == 'ea' then
 		applyPatches('early-access-merge')
 		print('Early access patches applied per request')
+		goto done
 	else
 		print(('Searching for PR named "%s"'):format(prToMerge))
 	end
@@ -145,5 +145,14 @@ else
 		if pr.title == prToMerge or pr.number == prToMerge then
 			mergePr(pr, "MANUAL")
 		end
-	end, label)
+	end,
+	nil,
+	--true
+	false
+	)
+	::done::
 end
+
+print('Finishing up: updating submodules')
+gitCommand(false, 'submodule', 'sync', '--recursive')
+gitCommand(false, 'submodule', 'update', '--recursive', '--init')
